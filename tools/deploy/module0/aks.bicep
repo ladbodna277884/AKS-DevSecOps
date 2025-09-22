@@ -19,7 +19,7 @@ param location string = resourceGroup().location
 param agentCount int = 1
 
 @description('Default node size.')
-param agentVMSize string = 'Standard_DS2_v2'
+param agentVMSize string = 'Standard_B2s'
 
 // ----------------------
 // ACR (Standard)

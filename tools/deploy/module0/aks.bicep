@@ -1,6 +1,8 @@
-// mandatory params
+// ----------------------
+// Params (kept as-is)
+// ----------------------
 @description('The unique DNS prefix for your cluster, such as myakscluster. This cannot be updated once the Managed Cluster has been created.')
-param dnsPrefix string = resourceGroup().name // name is obtained from env
+param dnsPrefix string = resourceGroup().name
 
 @description('The unique name for the AKS cluster, such as myAKSCluster.')
 param clusterName string = 'devsecops-aks'
@@ -8,21 +10,21 @@ param clusterName string = 'devsecops-aks'
 @description('The unique name for the Azure Key Vault.')
 param akvName string = 'akv-${uniqueString(resourceGroup().id)}'
 
-
-// Optional params
-@description('The region to deploy the cluster. By default this will use the same region as the resource group.')
+@description('The region to deploy the cluster. Defaults to the resource group location.')
 param location string = resourceGroup().location
 
 @minValue(1)
 @maxValue(50)
-@description('Number of agents (VMs) to host docker containers. Allowed values must be in the range of 0 to 1000 (inclusive) for user pools and in the range of 1 to 1000 (inclusive) for system pools. The default value is 1.')
+@description('Number of agents (VMs) to host containers.')
 param agentCount int = 1
 
-@description('VM size availability varies by region. If a node contains insufficient compute resources (memory, cpu, etc) pods might fail to run correctly. For more details on restricted VM sizes, see: https://docs.microsoft.com/azure/aks/quotas-skus-regions')
+@description('Default node size.')
 param agentVMSize string = 'Standard_DS2_v2'
 
-// create azure container registry
-resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
+// ----------------------
+// ACR (Standard)
+// ----------------------
+resource acr 'Microsoft.ContainerRegistry/registries@2025-05-01-preview' = {
   name: 'acr${uniqueString(resourceGroup().id)}'
   location: location
   sku: {
@@ -32,11 +34,14 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
     type: 'SystemAssigned'
   }
   properties: {
-    adminUserEnabled: true
+    adminUserEnabled: false // more secure than true
   }
 }
 
-resource aks 'Microsoft.ContainerService/managedClusters@2022-09-02-preview' = {
+// ----------------------
+// AKS (Managed Identity + AAD RBAC)
+// ----------------------
+resource aks 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
   name: clusterName
   location: location
   identity: {
@@ -44,46 +49,93 @@ resource aks 'Microsoft.ContainerService/managedClusters@2022-09-02-preview' = {
   }
   properties: {
     dnsPrefix: dnsPrefix
+    // Minimal system pool
     agentPoolProfiles: [
       {
-        name: 'agentpool'
+        name: 'systempool'
+        mode: 'System'
         count: agentCount
         vmSize: agentVMSize
         osType: 'Linux'
-        mode: 'System'
+        type: 'VirtualMachineScaleSets'
       }
-    ]    
+    ]
+
+    // Enable modern Entra ID integration + Azure RBAC
     aadProfile: {
       managed: true
       enableAzureRBAC: true
-    }    
+      // tenantID defaults to the deployment tenant if omitted; keep it implicit
+    }
+
+    // Optional: keep default (Kubenet). Uncomment to force Azure CNI:
+    // networkProfile: {
+    //   networkPlugin: 'azure'
+    // }
   }
 }
 
-resource akv 'Microsoft.KeyVault/vaults@2022-07-01' = {
+// ----------------------
+// Key Vault (RBAC or Access Policies)
+// ----------------------
+resource akv 'Microsoft.KeyVault/vaults@2024-11-01' = {
   name: akvName
   location: location
   properties: {
-    sku: {
-      name: 'standard'
-      family: 'A'
-    }
     tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    // If you prefer Azure RBAC for data-plane auth:
+    // enableRbacAuthorization: true
+    // accessPolicies: []
+    //
+    // If you want to keep access policies (legacy model), leave enableRbacAuthorization unset
+    // and keep an allowlist for the AKS control plane identity (not kubelet).
     accessPolicies: [
       {
         tenantId: subscription().tenantId
         objectId: aks.identity.principalId
         permissions: {
-          keys: [
-            'get'
-          ]
-          secrets: [
-            'get'
-          ]
+          keys: [ 'get' ]
+          secrets: [ 'get' ]
         }
       }
     ]
+    // Recommended hardening (optional):
+    // enableSoftDelete: true // default on in most regions
+    // enablePurgeProtection: true
   }
 }
 
+// ----------------------
+// RBAC: Give AKS kubelet identity AcrPull on ACR
+// (works whether AKS creates its own kubelet UAMI or you supply one)
+// ----------------------
+
+// Built-in AcrPull role definition GUID
+var acrPullRoleDefId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+)
+
+// AKS exposes the kubelet identity under properties.identityProfile['kubeletidentity'] after creation.
+// In ARM/Bicep you can reference it at deploy time for RBAC.
+resource acrAksAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acr.id, aks.name, 'acrpull')
+  scope: acr
+  properties: {
+    roleDefinitionId: acrPullRoleDefId
+    principalId: aks.properties.identityProfile['kubeletidentity'].objectId
+  }
+  dependsOn: [
+    acr
+    aks
+  ]
+}
+
+// ----------------------
+// Outputs
+// ----------------------
 output controlPlaneFQDN string = aks.properties.fqdn

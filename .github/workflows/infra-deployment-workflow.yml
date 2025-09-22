@@ -1,53 +1,66 @@
+name: Deploy AKS module0
+
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'tools/deploy/module0/**'
-  
+    branches: [ main ]
+    paths: [ 'tools/deploy/module0/**' ]
   workflow_dispatch:
-env:
-  # CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
-  CLUSTER_RESOURCE_GROUP: ${{ secrets.CLUSTER_RESOURCE_GROUP }}
 
-  # name: Azure ARM
+env:
+  RG: ${{ secrets.CLUSTER_RESOURCE_GROUP }}
+
 permissions:
-  id-token: write # This is required for requesting the JWT
-  contents: read  # This is required for actions/checkout
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aks-module0-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Checkout code
-    - uses: actions/checkout@main
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Log into Azure
-    - uses: azure/login@v1
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        # creds: ${{ secrets.AZURE_CREDENTIALS }}
+      # Optional: preview changes (what-if) to surface real validation errors
+      - name: What-if (preview)
+        id: whatif
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: whatIf
+          scope: resourceGroup
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group-name: ${{ env.RG }}
+          template-file: tools/deploy/module0/aks.bicep
+          # If you use .bicepparam, point to it; otherwise omit:
+          # parameters-file: tools/deploy/module0/aks.bicepparam
+          validation-level: provider    # better error surfacing
 
-      # Deploy Bicep file
-    - name: deploy
-      uses: azure/arm-deploy@v1
-      with:
-        subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        resourceGroupName: ${{ secrets.CLUSTER_RESOURCE_GROUP }}
-        template: tools/deploy/module0/aks.bicep 
-        # parameters: tools/deploy/module0/azuredeploy.parameters.json
-        failOnStdErr: false
+      - name: Create deployment
+        id: deploy
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: create
+          scope: resourceGroup
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resource-group-name: ${{ env.RG }}
+          template-file: tools/deploy/module0/aks.bicep
+          # parameters-file: tools/deploy/module0/aks.bicepparam
 
-      # az feature register for Lab 1
-    - name: az feature register
-      run: |
-        az feature register --namespace "Microsoft.ContainerService" --name "EnableWorkloadIdentityPreview"
-
-      # Attach ACR to AKS
-    - name: attach Azure Container Registry to AKS
-      run: |
-        CLUSTER_NAME=$(az aks list --resource-group ${{ secrets.CLUSTER_RESOURCE_GROUP }} --query "[].name" -o tsv)
-        ACR_NAME=$(az acr list --resource-group ${{ secrets.CLUSTER_RESOURCE_GROUP }} --query "[].name" -o tsv)
-        az aks update -n $CLUSTER_NAME -g ${{ secrets.CLUSTER_RESOURCE_GROUP }} --attach-acr $ACR_NAME      
+      # Attach ACR to AKS (only needed if template didn't grant AcrPull to kubelet)
+      - name: Attach ACR to AKS
+        run: |
+          CLUSTER_NAME=$(az aks list --resource-group "$RG" --query "[0].name" -o tsv)
+          ACR_NAME=$(az acr list --resource-group "$RG" --query "[0].name" -o tsv)
+          az aks update -g "$RG" -n "$CLUSTER_NAME" --attach-acr "$ACR_NAME"

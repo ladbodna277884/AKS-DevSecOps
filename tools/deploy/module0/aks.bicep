@@ -120,19 +120,15 @@ var acrPullRoleDefId = subscriptionResourceId(
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 )
 
-// AKS exposes the kubelet identity under properties.identityProfile['kubeletidentity'] after creation.
-// In ARM/Bicep you can reference it at deploy time for RBAC.
+// Give the AKS kubelet identity AcrPull on ACR
 resource acrAksAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(acr.id, aks.name, 'acrpull')
   scope: acr
   properties: {
     roleDefinitionId: acrPullRoleDefId
-    principalId: aks.properties.identityProfile['kubeletidentity'].objectId
+    // was: aks.properties.identityProfile['kubeletidentity'].objectId
+    principalId: aks.properties.identityProfile.kubeletidentity.objectId
   }
-  dependsOn: [
-    acr
-    aks
-  ]
 }
 
 // ----------------------
